@@ -1,0 +1,11 @@
+.DS_Store
+**/.DS_Store
+
+# Local Claude Code IDE permission grants - machine-local, not part of the skill config
+.claude/settings.local.json
+
+# Client/business data (buyer lists, attachments, draft-tracking state) lives outside
+# this repo now - see /Users/thehallidayeffect/Desktop/FITO_VITA_CFA_data/
+attachments/
+output/
+setup.md

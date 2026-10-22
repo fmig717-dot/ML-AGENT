@@ -1,0 +1,21 @@
+[
+  {
+    "company": "Example Foods Import LLC",
+    "product": "EXAMPLE_PRODUCT",
+    "country": "Turkey",
+    "region": "Istanbul",
+    "website": "https://example-foods-import.example",
+    "email": "purchasing@example-foods-import.example",
+    "phone": "+90 000 000 00 00",
+    "contact_person": "не найдено — уточнить вручную",
+    "notes": "Первый контакт оформить как soft commercial offer: без жёсткой цены, с кратким описанием продукта и объёма. Использовать шаблон подписи из правил клиента.",
+    "fit_reasoning": "Компания — импортёр продукции данной категории в целевом регионе, что соответствует профилю покупателя из шага 2.",
+    "status": "Не контактировали",
+    "last_contact_date": "",
+    "next_step": "Отправить soft commercial offer на purchasing@example-foods-import.example",
+    "kp_number": "",
+    "wave": "",
+    "qc_data": "",
+    "qc_email": ""
+  }
+]
