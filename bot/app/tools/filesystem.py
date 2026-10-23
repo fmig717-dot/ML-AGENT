@@ -90,6 +90,64 @@ def write_data_file(path: str, content: str) -> dict:
     return {"path": path, "bytes_written": len(content.encode("utf-8"))}
 
 
+MAX_DOC_READ_BYTES = 20_000_000  # документы (спецификации/КП) могут быть крупнее текстовых файлов
+
+
+def read_pdf_file(path: str, max_pages: int = 50) -> dict:
+    """
+    Извлекает текст из PDF (спецификация, анализ рынка, готовое КП и т.п.), присланного
+    пользователем через Telegram и сохранённого в рабочей директории (см. list_data_tree
+    по 'inbox/<chat_id>'). Не извлекает изображения/таблицы как структуру — только
+    текстовый слой; если PDF — это скан без текстового слоя, вернётся пустой/короткий
+    текст, об этом нужно честно сообщить пользователю, а не выдумывать содержание.
+    """
+    from pypdf import PdfReader
+
+    full = _resolve(DATA_DIR, path)
+    if not os.path.isfile(full):
+        return {"error": f"Файл не найден: {path}"}
+    size = os.path.getsize(full)
+    if size > MAX_DOC_READ_BYTES:
+        return {"error": f"Файл слишком большой ({size} байт) для чтения целиком"}
+    try:
+        reader = PdfReader(full)
+    except Exception as exc:
+        return {"error": f"Не удалось открыть PDF: {type(exc).__name__}: {exc}"}
+
+    total_pages = len(reader.pages)
+    texts = []
+    for i, page in enumerate(reader.pages):
+        if i >= max_pages:
+            texts.append(f"... (обрезано на странице {max_pages} из {total_pages})")
+            break
+        texts.append(page.extract_text() or "")
+    return {"path": path, "total_pages": total_pages, "content": "\n\n".join(texts)}
+
+
+def read_docx_file(path: str) -> dict:
+    """Извлекает текст (параграфы и таблицы) из .docx, присланного пользователем."""
+    import docx
+
+    full = _resolve(DATA_DIR, path)
+    if not os.path.isfile(full):
+        return {"error": f"Файл не найден: {path}"}
+    size = os.path.getsize(full)
+    if size > MAX_DOC_READ_BYTES:
+        return {"error": f"Файл слишком большой ({size} байт) для чтения целиком"}
+    try:
+        document = docx.Document(full)
+    except Exception as exc:
+        return {"error": f"Не удалось открыть DOCX: {type(exc).__name__}: {exc}"}
+
+    parts = [p.text for p in document.paragraphs if p.text.strip()]
+    for table in document.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            if any(cells):
+                parts.append(" | ".join(cells))
+    return {"path": path, "content": "\n".join(parts)}
+
+
 def read_xlsx_sheet(path: str, sheet_name: str | None = None, max_rows: int = 300) -> dict:
     """
     Читает .xlsx из рабочей директории. Без sheet_name — возвращает список листов.

@@ -6,9 +6,12 @@
 Переписка по каждому чату хранится в DATA_DIR/conversations/<chat_id>.json,
 чтобы не терять контекст при перезапуске контейнера (редеплой на хостинге).
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
+from typing import Callable, Optional
 
 from anthropic import Anthropic, BadRequestError
 
@@ -19,31 +22,73 @@ logger = logging.getLogger(__name__)
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-MAX_TOOL_ROUNDS = 12
+# Автономный полный пайплайн (market-supervisor Шаг 7: досье продукта -> до 50 покупателей
+# и 50 драфтов за один прогон) требует намного больше раундов инструментов, чем обычный
+# ручной диалог — отсюда щедрый лимит. web_search max_uses тоже поднят для того же случая.
+MAX_TOOL_ROUNDS = 300
+MAX_WEB_SEARCH_USES = 40
 MAX_HISTORY_MESSAGES = 40  # обрезаем старую историю, чтобы не раздувать контекст/счёт
 
 SYSTEM_PROMPT = """\
-Ты — торговый ассистент Trading Department FITO VITA SRL в Telegram. Ты заменяешь
+Ты — торговый ассистент Trading Department FITO VITA SRL в Telegram, универсальный
+инструмент для трейдера: продукт каждый раз МЕНЯЕТСЯ (не только CFA), ты сам
+подстраиваешься под то, что пользователь присылает в конкретном разговоре. Ты заменяешь
 агента, который раньше работал внутри Claude Code с тремя skill'ами. Эти skill'ы
 физически лежат как файлы в /app/skills (инструмент list_skill_tree/read_skill_file) —
 они НЕ в этом системном промпте, читай их сам по необходимости, как и раньше.
 
 Три направления работы (подробности — в SKILL.md каждого):
 1. buyer-finder (skills/buyer-finder) — поиск покупателей под продукт, сбор в
-   buyers.xlsx/buyers.json в рабочей директории.
+   buyers.xlsx/buyers.json в рабочей директории. Целевое количество компаний настраивается
+   (см. раздел "Целевое количество компаний" в SKILL.md) — не ограничивайся 3 компаниями,
+   если запрошен больший объём (вплоть до 50) или идёт автономный полный пайплайн.
 2. offer-drafter (skills/offer-drafter) — подготовка Soft Commercial Offer и
    черновиков Gmail по найденным покупателям. ОБЯЗАТЕЛЬНО прочитай
    skills/offer-drafter/rules.md целиком перед тем как делать что-либо в этом
    направлении — это живой документ с обязательными правилами (нумерация КП,
-   подпись, отсутствие вложений по умолчанию, строго последовательное
-   создание драфтов в обратном порядке, немедленная остановка при ошибке).
-3. market-supervisor (skills/market-supervisor) — контроль качества данных о
-   покупателях и писем, владение содержанием КП по продуктам. Прочитай
+   подпись, отсутствие вложений по умолчанию, строго последовательное создание
+   драфтов в обратном порядке). Правило 6 там различает два режима ошибки на одной
+   компании: обычный ручной запрос в чате останавливает всю волну, автономный полный
+   пайплайн — пропускает проблемную компанию и продолжает.
+3. market-supervisor (skills/market-supervisor) — исследование рынка, QC данных и
+   писем, владение содержанием КП по продуктам, и Шаг 7 — автономный полный пайплайн
+   "досье продукта -> готовые драфты одним прогоном". Прочитай
    skills/market-supervisor/rules.md перед работой в этом направлении.
 
-Рабочие файлы (buyers.xlsx, kp_state.json, вложения, заметки) живут в рабочей
+## Автономный полный пайплайн (когда пользователь присылает досье продукта и просит всё сделать целиком)
+
+Если пользователь одним сообщением/серией файлов присылает данные по продукту
+(спецификация, анализ рынка, готовое КП, просто описание текстом) и просит целиком
+отработать воронку (рынок -> покупатели -> письма), следуй `market-supervisor/SKILL.md`
+Шаг 7 — читай его целиком перед началом. Короче: ты сам доходишь от досье до готовых
+драфтов без промежуточных "подтвердите, пожалуйста" в диалоге, и отчитываешься одним
+финальным сообщением (инсайты рынка, предложение по цене если есть повод, сколько
+покупателей найдено с краткими карточками, сколько драфтов создано/пропущено).
+Целевой объём по умолчанию — 50 покупателей/драфтов за прогон, если пользователь явно не
+указал другое число; для самого первого прогона в этой новой версии ориентируйся на
+10-15, если пользователь не попросил сразу 50 — решение о масштабе первого теста за
+пользователем, не выбирай 50 молча, если контекст похож на первый тест новой системы.
+
+Такой прогон обычно долгий (десятки вызовов инструментов). Используй
+`send_progress_update`, чтобы присылать короткие промежуточные сообщения по ходу
+(например "Рынок изучен, нашёл 4 сигнала" / "Найдено 23 из 50 покупателей" / "Создано
+17 драфтов, 2 компании пропущены — нет email") — не заставляй пользователя гадать, жив
+ли процесс, несколько минут подряд в тишине.
+
+## Приём файлов от пользователя
+
+Файлы, присланные пользователем в Telegram (спецификация, анализ, КП), сохраняются в
+рабочую директорию под `inbox/<chat_id>/...` — ты увидишь путь в системном уведомлении
+о получении файла. Читай их через: `read_data_file` (.txt/.md/.json/.csv),
+`read_pdf_file` (.pdf — только текстовый слой; если текст пустой/короткий, скан без
+OCR, честно скажи об этом, не выдумывай содержание), `read_docx_file` (.docx),
+`read_xlsx_sheet` (.xlsx). Фото пока не поддерживаются как источник данных — попроси
+переслать как PDF/DOCX/текст, если пришла фотография документа.
+
+Рабочие файлы (buyers.xlsx, kp_state.json, вложения, заметки, inbox/) живут в рабочей
 директории (инструменты list_data_tree/read_data_file/write_data_file/
-read_xlsx_sheet) — НЕ в skills/, туда только читай инструкции.
+read_xlsx_sheet/read_pdf_file/read_docx_file) — НЕ в skills/, туда только читай
+инструкции.
 
 Готовые python-скрипты из skill'ов запускай через run_script (см.
 list_available_scripts) вместо того чтобы писать свою логику заново —
@@ -57,8 +102,10 @@ gmail_update_draft/gmail_delete_draft. Если они возвращают ош
 Общение — на русском, по-деловому, без лишней воды. Если правила skill'а и
 прямая просьба пользователя в этом чате противоречат друг другу — следуй
 правилам, но явно скажи пользователю, в чём противоречие, и спроси, как быть
-(не нарушай правила тихо). Если чего-то не хватает (нет email покупателя, не
-настроен Gmail, файл не найден) — остановись и спроси, не выдумывай данные.
+(не нарушай правила тихо). Если чего-то категорически не хватает для продолжения (например
+нет вообще никаких данных по продукту) — остановись и спроси, не выдумывай данные;
+но отсутствие отдельных деталей не повод останавливать весь автономный прогон — работай с
+тем, что есть, и прямо помечай предположения в финальном отчёте.
 """
 
 TOOLS = [
@@ -116,6 +163,42 @@ TOOLS = [
                 "max_rows": {"type": "integer"},
             },
             "required": ["path"],
+        },
+    },
+    {
+        "name": "read_pdf_file",
+        "description": (
+            "Извлекает текст из PDF в рабочей директории (спецификация, анализ рынка, "
+            "готовое КП, присланные пользователем в Telegram и сохранённые в inbox/). "
+            "Только текстовый слой — скан без текста даст пустой результат."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "max_pages": {"type": "integer"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "read_docx_file",
+        "description": "Извлекает текст и таблицы из .docx в рабочей директории.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "send_progress_update",
+        "description": (
+            "Отправляет пользователю короткое промежуточное сообщение в Telegram ПРЯМО "
+            "СЕЙЧАС, не дожидаясь конца хода — используй в длинных автономных прогонах "
+            "(поиск/QC/создание много драфтов), чтобы пользователь видел прогресс. Не "
+            "заменяет финальный текстовый ответ в конце хода."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
         },
     },
     {
@@ -205,6 +288,8 @@ DISPATCH = {
     "read_xlsx_sheet": lambda **kw: filesystem.read_xlsx_sheet(
         kw["path"], kw.get("sheet_name"), kw.get("max_rows", 300)
     ),
+    "read_pdf_file": lambda **kw: filesystem.read_pdf_file(kw["path"], kw.get("max_pages", 50)),
+    "read_docx_file": lambda **kw: filesystem.read_docx_file(kw["path"]),
     "list_available_scripts": lambda **kw: scripts.list_available_scripts(),
     "run_script": lambda **kw: scripts.run_script(kw["script"], kw.get("args", [])),
     "gmail_create_draft": lambda **kw: gmail.create_draft(**kw),
@@ -243,7 +328,18 @@ def reset_history(chat_id: int) -> None:
         os.remove(path)
 
 
-def _execute_tool(name: str, tool_input: dict) -> dict:
+def _execute_tool(name: str, tool_input: dict, on_progress: Optional[Callable[[str], None]] = None) -> dict:
+    if name == "send_progress_update":
+        message = tool_input.get("message", "")
+        if on_progress is None:
+            return {"sent": False, "note": "Канал промежуточных сообщений не настроен для этого запуска."}
+        try:
+            on_progress(message)
+            return {"sent": True}
+        except Exception as exc:
+            logger.exception("Не удалось отправить промежуточное сообщение")
+            return {"sent": False, "error": f"{type(exc).__name__}: {exc}"}
+
     fn = DISPATCH.get(name)
     if fn is None:
         return {"error": f"Неизвестный инструмент: {name}"}
@@ -254,9 +350,14 @@ def _execute_tool(name: str, tool_input: dict) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def run_turn(chat_id: int, user_text: str) -> str:
+def run_turn(chat_id: int, user_text: str, on_progress: Optional[Callable[[str], None]] = None) -> str:
     """Один обмен репликами: добавляет сообщение пользователя, прогоняет цикл
-    tool-use до финального текстового ответа, сохраняет историю, возвращает ответ."""
+    tool-use до финального текстового ответа, сохраняет историю, возвращает ответ.
+
+    on_progress (опционально) — вызывается синхронно каждый раз, когда модель зовёт
+    send_progress_update; main.py передаёт сюда функцию, которая шлёт сообщение в
+    Telegram сразу, не дожидаясь конца всего хода (нужно для долгих автономных
+    прогонов на десятки покупателей/драфтов)."""
     messages = _load_history(chat_id)
     messages.append({"role": "user", "content": user_text})
 
@@ -266,7 +367,7 @@ def run_turn(chat_id: int, user_text: str) -> str:
 
     for _ in range(MAX_TOOL_ROUNDS):
         request_tools = tools + (
-            [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+            [{"type": "web_search_20250305", "name": "web_search", "max_uses": MAX_WEB_SEARCH_USES}]
             if use_web_search
             else []
         )
@@ -298,7 +399,7 @@ def run_turn(chat_id: int, user_text: str) -> str:
         for block in assistant_content:
             if block.get("type") != "tool_use":
                 continue
-            result = _execute_tool(block["name"], block.get("input", {}))
+            result = _execute_tool(block["name"], block.get("input", {}), on_progress)
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block["id"],
